@@ -25,6 +25,7 @@
     "enabled": true
   },
   "vars": {
+    "NEXT_PUBLIC_GATEWAY_URL": "https://api.snapflix.indevs.in",
     "NEXT_PUBLIC_BACKEND_URL": "https://vidly.snapflix.indevs.in",
     "NEXT_PUBLIC_VIDBOLT_URL": "https://vidbolt.snapflix.indevs.in",
     "NEXT_PUBLIC_VIDRIFT_URL": "https://vidrift.snapflix.indevs.in",

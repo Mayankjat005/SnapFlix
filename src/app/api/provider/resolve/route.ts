@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+const MASTER_GATEWAY = (process.env.NEXT_PUBLIC_GATEWAY_URL || 'https://api.snapflix.indevs.in').replace(/\/$/, '');
 const PRIMARY_BACKEND = (process.env.NEXT_PUBLIC_BACKEND_URL || 'https://vidly.snapflix.indevs.in').replace(/\/$/, '');
 const VIDBOLT_BACKEND = (process.env.NEXT_PUBLIC_VIDBOLT_URL || 'https://vidbolt.snapflix.indevs.in').replace(/\/$/, '');
 const VIDRIFT_BACKEND = (process.env.NEXT_PUBLIC_VIDRIFT_URL || 'https://vidrift.snapflix.indevs.in').replace(/\/$/, '');
@@ -15,6 +16,30 @@ export async function GET(request: NextRequest) {
       'X-SnapFlix-Client': 'snapflix-web',
     };
 
+    // 1. Prioritize Master Gateway (Unified 4-engine orchestrator with Hindi-first priority & cache)
+    try {
+      const gwRes = await fetch(`${MASTER_GATEWAY}/api/v1/resolve?${searchParams.toString()}`, {
+        headers: authHeaders,
+        next: { revalidate: 3600 },
+      });
+      if (gwRes.ok) {
+        const gwData = await gwRes.json();
+        if (gwData?.success && (gwData?.streams?.length > 0 || gwData?.results?.length > 0)) {
+          return NextResponse.json(gwData, {
+            status: 200,
+            headers: {
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Methods': 'GET, OPTIONS',
+              'Access-Control-Allow-Headers': '*',
+            },
+          });
+        }
+      }
+    } catch (gwErr) {
+      console.warn('[SnapFlix-Web API/Resolve] Master Gateway bypassed, falling back to direct scrapers:', gwErr);
+    }
+
+    // 2. Direct scraper fallback
     const [primarySettled, vidboltSettled, vidriftSettled, secondarySettled] = await Promise.allSettled([
       fetch(`${PRIMARY_BACKEND}/api/provider/resolve?${searchParams.toString()}`, {
         headers: authHeaders,

@@ -2362,15 +2362,11 @@ export default function NativeWebPlayer({
           if (episode) params.append('episode', String(episode));
         }
 
+        const gatewayApiBase = (process.env.NEXT_PUBLIC_GATEWAY_URL || 'https://api.snapflix.indevs.in').replace(/\/$/, '');
         const primaryApiBase = (process.env.NEXT_PUBLIC_BACKEND_URL || 'https://vidly.snapflix.indevs.in').replace(/\/$/, '');
         const vidboltApiBase = (process.env.NEXT_PUBLIC_VIDBOLT_URL || 'https://vidbolt.snapflix.indevs.in').replace(/\/$/, '');
         const vidriftApiBase = (process.env.NEXT_PUBLIC_VIDRIFT_URL || 'https://vidrift.snapflix.indevs.in').replace(/\/$/, '');
         const secondaryApiBase = (process.env.NEXT_PUBLIC_BACKEND_URL_TIER2 || 'https://vidy.snapflix.indevs.in').replace(/\/$/, '');
-
-        const primaryUrl = `${primaryApiBase}/api/provider/resolve?${params.toString()}`;
-        const vidboltUrl = `${vidboltApiBase}/api/provider/resolve?${params.toString()}`;
-        const vidriftUrl = `${vidriftApiBase}/api/provider/resolve?${params.toString()}`;
-        const secUrl = `${secondaryApiBase}/api/provider/resolve?${params.toString()}`;
 
         // Reset standby fallback and results for this new media load
         standbyFallbackRef.current = null;
@@ -2382,94 +2378,151 @@ export default function NativeWebPlayer({
         setCurrentHlsAudioTrack(-1);
         userSelectedLangRef.current = null;
 
-        // Parallel initiation: Fetch Vidly, VidBolt, VidRift, and Vidy simultaneously
-        const primaryPromise = fetch(primaryUrl)
-          .then(async (r) => (r.ok ? r.json() : null))
-          .catch((err) => {
-            console.warn('[Player] Vidly resolve network error:', err);
-            return null;
-          });
-
-        const vidboltPromise = fetch(vidboltUrl)
-          .then(async (r) => (r.ok ? r.json() : null))
-          .catch((err) => {
-            console.warn('[Player] VidBolt resolve network error:', err);
-            return null;
-          });
-
-        const vidriftPromise = fetch(vidriftUrl)
-          .then(async (r) => (r.ok ? r.json() : null))
-          .catch((err) => {
-            console.warn('[Player] VidRift resolve network error:', err);
-            return null;
-          });
-
-        const secPromise = fetch(secUrl)
-          .then(async (r) => (r.ok ? r.json() : null))
-          .catch((err) => {
-            console.warn('[Player] Vidy standby network error:', err);
-            return null;
-          });
-
-        // Pre-warm VidBolt, VidRift & Vidy in memory (passive background)
-        vidboltPromise.then((vbData) => {
-          if (active && vbData?.success && Array.isArray(vbData.results) && vbData.results.length > 0) {
-            setVidboltResults(vbData.results);
-            console.log('[Player] Server 2 (VidBolt) pre-warmed & ready in memory');
+        // 1. Master Gateway: Fetch all 4 VPS engines unified with Hindi prioritization and cache
+        let gatewayData: any = null;
+        try {
+          const gwRes = await fetch(`${gatewayApiBase}/api/v1/resolve?${params.toString()}`);
+          if (gwRes.ok) {
+            const parsed = await gwRes.json();
+            if (parsed?.success && Array.isArray(parsed?.streams) && parsed.streams.length > 0) {
+              gatewayData = parsed;
+            }
           }
-        });
+        } catch (gwErr) {
+          console.warn('[Player] Master Gateway resolve error, falling back to direct scrapers:', gwErr);
+        }
 
-        vidriftPromise.then((vrData) => {
-          if (active && vrData?.success && Array.isArray(vrData.results) && vrData.results.length > 0) {
-            setVidriftResults(vrData.results);
-            console.log('[Player] Server 3 (VidRift) pre-warmed & ready in memory');
-          }
-        });
+        if (!active) return;
 
-        secPromise.then((secData) => {
-          if (active && secData?.success && Array.isArray(secData.results) && secData.results.length > 0) {
-            setVidyResults(secData.results);
-            standbyFallbackRef.current = { provider: 'Vidy', results: secData.results };
-            console.log('[Player] Standby fallback (Vidy) pre-warmed & cached in memory');
-          }
-        });
-
-        // 1. Await Vidly (Primary Edge)
-        const primaryData = await primaryPromise;
         let chosenResults: any[] = [];
         let chosenProvider: 'vidly' | 'vidbolt' | 'vidrift' | 'vidy' = 'vidly';
+        let chosen: StreamItem | null = null;
 
-        const hasValidPrimary =
-          primaryData?.success &&
-          Array.isArray(primaryData.results) &&
-          primaryData.results.some((p: any) => p.streams?.some((s: StreamItem) => isPlayableStream(s)));
+        if (gatewayData) {
+          // Unpack engines into individual server states simultaneously (NO progressive drip-feed!)
+          const vlyStreams = (gatewayData.engines?.find((e: any) => e.engine === 'vidly')?.streams || []).filter(isPlayableStream);
+          const vbtStreams = (gatewayData.engines?.find((e: any) => e.engine === 'vidbolt')?.streams || []).filter(isPlayableStream);
+          const vrfStreams = (gatewayData.engines?.find((e: any) => e.engine === 'vidrift')?.streams || []).filter(isPlayableStream);
+          const vdyStreams = (gatewayData.engines?.find((e: any) => e.engine === 'vidy')?.streams || []).filter(isPlayableStream);
 
-        if (hasValidPrimary) {
-          console.log('[Player] Primary provider (Vidly) active with master multi-audio stream');
-          chosenResults = primaryData.results;
-          setVidlyResults(primaryData.results);
-          chosenProvider = 'vidly';
-        } else {
-          console.warn('[Player] Vidly returned no playable streams. Trying Server 2 (VidBolt)...');
-          const vbData = await vidboltPromise;
-          if (vbData?.success && Array.isArray(vbData.results) && vbData.results.length > 0) {
-            chosenResults = vbData.results;
-            setVidboltResults(vbData.results);
-            chosenProvider = 'vidbolt';
-          } else {
-            console.warn('[Player] VidBolt returned no streams. Trying Server 3 (VidRift)...');
-            const vrData = await vidriftPromise;
-            if (vrData?.success && Array.isArray(vrData.results) && vrData.results.length > 0) {
-              chosenResults = vrData.results;
-              setVidriftResults(vrData.results);
+          const vlyRes = vlyStreams.length > 0 ? [{ providerValue: 'vidly', providerName: 'SnapFlix Fast', streams: vlyStreams }] : [];
+          const vbtRes = vbtStreams.length > 0 ? [{ providerValue: 'vidbolt', providerName: 'VidBolt Turbo', streams: vbtStreams }] : [];
+          const vrfRes = vrfStreams.length > 0 ? [{ providerValue: 'vidrift', providerName: 'VidRift HD', streams: vrfStreams }] : [];
+          const vdyRes = vdyStreams.length > 0 ? [{ providerValue: 'vidy', providerName: 'Vidy Cloud', streams: vdyStreams }] : [];
+
+          setVidlyResults(vlyRes);
+          setVidboltResults(vbtRes);
+          setVidriftResults(vrfRes);
+          setVidyResults(vdyRes);
+
+          // User requirement: Default & preferred language is Hindi. Fallback to English/original.
+          const isHindiStream = (s: StreamItem) => {
+            const l = (s.language || '').toLowerCase();
+            const t = (s.tag || '').toLowerCase();
+            return l.includes('hindi') || l === 'hin' || l === 'hi' || t.includes('hindi') || t.includes('[hindi]');
+          };
+
+          const playableStreams: StreamItem[] = (gatewayData.streams || []).filter(isPlayableStream);
+          const hindiStream = playableStreams.find(isHindiStream);
+          const targetStream = hindiStream || playableStreams[0] || null;
+
+          if (targetStream) {
+            // Determine provider
+            if (vrfStreams.some((s: StreamItem) => s.link === targetStream.link)) {
               chosenProvider = 'vidrift';
+              chosenResults = vrfRes;
+              chosen = { ...targetStream, providerName: 'VidRift HD' };
+            } else if (vlyStreams.some((s: StreamItem) => s.link === targetStream.link)) {
+              chosenProvider = 'vidly';
+              chosenResults = vlyRes;
+              chosen = { ...targetStream, providerName: 'SnapFlix Fast' };
+            } else if (vbtStreams.some((s: StreamItem) => s.link === targetStream.link)) {
+              chosenProvider = 'vidbolt';
+              chosenResults = vbtRes;
+              chosen = { ...targetStream, providerName: 'VidBolt Turbo' };
+            } else if (vdyStreams.some((s: StreamItem) => s.link === targetStream.link)) {
+              chosenProvider = 'vidy';
+              chosenResults = vdyRes;
+              chosen = { ...targetStream, providerName: 'Vidy Cloud' };
             } else {
-              console.warn('[Player] VidRift returned no streams. Falling back to Server 4 (Vidy)...');
-              const secData = await secPromise;
-              if (secData?.success && Array.isArray(secData.results) && secData.results.length > 0) {
-                chosenResults = secData.results;
-                setVidyResults(secData.results);
-                chosenProvider = 'vidy';
+              if (vrfRes.length > 0) { chosenProvider = 'vidrift'; chosenResults = vrfRes; }
+              else if (vlyRes.length > 0) { chosenProvider = 'vidly'; chosenResults = vlyRes; }
+              else if (vbtRes.length > 0) { chosenProvider = 'vidbolt'; chosenResults = vbtRes; }
+              else { chosenProvider = 'vidy'; chosenResults = vdyRes; }
+              chosen = targetStream;
+            }
+
+            if (hindiStream) {
+              setActiveLanguage('Hindi');
+            } else if (isHlsStream(targetStream)) {
+              setActiveLanguage('Hindi');
+            } else {
+              const langs = getStreamAudioLanguages(targetStream, chosenResults[0]?.infoTitle, originalLanguage);
+              setActiveLanguage(langs[0] || 'English');
+            }
+          }
+        } else {
+          // Direct fallback to 4 scrapers if Master Gateway is unreachable
+          const primaryUrl = `${primaryApiBase}/api/provider/resolve?${params.toString()}`;
+          const vidboltUrl = `${vidboltApiBase}/api/provider/resolve?${params.toString()}`;
+          const vidriftUrl = `${vidriftApiBase}/api/provider/resolve?${params.toString()}`;
+          const secUrl = `${secondaryApiBase}/api/provider/resolve?${params.toString()}`;
+
+          const [pRes, vbRes, vrRes, secRes] = await Promise.allSettled([
+            fetch(primaryUrl).then((r) => (r.ok ? r.json() : null)),
+            fetch(vidboltUrl).then((r) => (r.ok ? r.json() : null)),
+            fetch(vidriftUrl).then((r) => (r.ok ? r.json() : null)),
+            fetch(secUrl).then((r) => (r.ok ? r.json() : null)),
+          ]);
+
+          if (!active) return;
+
+          const pData = pRes.status === 'fulfilled' ? pRes.value : null;
+          const vbData = vbRes.status === 'fulfilled' ? vbRes.value : null;
+          const vrData = vrRes.status === 'fulfilled' ? vrRes.value : null;
+          const secData = secRes.status === 'fulfilled' ? secRes.value : null;
+
+          if (pData?.results) setVidlyResults(pData.results);
+          if (vbData?.results) setVidboltResults(vbData.results);
+          if (vrData?.results) setVidriftResults(vrData.results);
+          if (secData?.results) setVidyResults(secData.results);
+
+          const allGroups: Array<{ key: 'vidrift' | 'vidly' | 'vidbolt' | 'vidy'; results: any[] }> = [
+            { key: 'vidrift', results: vrData?.results || [] },
+            { key: 'vidly', results: pData?.results || [] },
+            { key: 'vidbolt', results: vbData?.results || [] },
+            { key: 'vidy', results: secData?.results || [] },
+          ];
+
+          for (const g of allGroups) {
+            for (const prov of g.results) {
+              const hMatch = prov.streams?.find((s: StreamItem) => {
+                if (!isPlayableStream(s)) return false;
+                const langs = getStreamAudioLanguages(s, prov.infoTitle, originalLanguage);
+                return langs.includes('Hindi');
+              });
+              if (hMatch) {
+                chosen = { ...hMatch, providerName: prov.providerName };
+                chosenProvider = g.key;
+                chosenResults = g.results;
+                setActiveLanguage('Hindi');
+                break;
+              }
+            }
+            if (chosen) break;
+          }
+
+          if (!chosen) {
+            for (const g of allGroups) {
+              if (g.results.length > 0) {
+                const match = g.results[0]?.streams?.find((s: StreamItem) => isPlayableStream(s));
+                if (match) {
+                  chosen = { ...match, providerName: g.results[0].providerName };
+                  chosenProvider = g.key;
+                  chosenResults = g.results;
+                  setActiveLanguage(isHlsStream(match) ? 'Hindi' : 'English');
+                  break;
+                }
               }
             }
           }
@@ -2477,69 +2530,12 @@ export default function NativeWebPlayer({
 
         if (!active) return;
 
-        if (chosenResults.length === 0) {
+        if (!chosen || chosenResults.length === 0) {
           throw new Error('No stream available from active providers.');
         }
 
         setActiveServerProvider(chosenProvider);
-        // Set providerResults to the active provider ONLY (never mixed!)
         setProviderResults(chosenResults);
-
-        // Pick the best streamable stream (m3u8 or mp4) - prioritizing Hindi audio
-        let chosen: StreamItem | null = null;
-
-        // 1. Check if any playable stream explicitly has Hindi audio
-        for (const prov of chosenResults) {
-          const hindiMatch = prov.streams.find((s: StreamItem) => {
-            if (!isPlayableStream(s)) return false;
-            const langs = getStreamAudioLanguages(s, prov.infoTitle, originalLanguage);
-            return langs.includes('Hindi');
-          });
-          if (hindiMatch) {
-            chosen = { ...hindiMatch, providerName: prov.providerName };
-            setActiveLanguage('Hindi');
-            break;
-          }
-        }
-
-        // 2. If no explicit Hindi stream, pick first playable stream (e.g. Adaptive HLS with multi-audio)
-        if (!chosen) {
-          for (const prov of chosenResults) {
-            const match = prov.streams.find((s: StreamItem) => isPlayableStream(s));
-            if (match) {
-              const streamChoice = { ...match, providerName: prov.providerName };
-              chosen = streamChoice;
-              const initialLangs = getStreamAudioLanguages(streamChoice, prov.infoTitle, originalLanguage);
-              if (initialLangs.includes('Hindi')) {
-                setActiveLanguage('Hindi');
-              } else if (isHlsStream(streamChoice)) {
-                // Adaptive HLS (e.g. Vidly Fast) contains internal multi-audio tracks in its manifest.
-                // Keep 'Hindi' as the preferred activeLanguage so HLS MANIFEST_PARSED auto-selects Hindi track if available!
-                setActiveLanguage('Hindi');
-              } else {
-                setActiveLanguage(initialLangs[0] || 'English');
-              }
-              break;
-            }
-          }
-        }
-
-        if (!chosen && chosenResults[0]?.streams?.length > 0) {
-          const fallbackChoice = {
-            ...chosenResults[0].streams[0],
-            providerName: chosenResults[0].providerName,
-          };
-          chosen = fallbackChoice;
-          const initialLangs = getStreamAudioLanguages(fallbackChoice, chosenResults[0].infoTitle, originalLanguage);
-          if (initialLangs.includes('Hindi')) {
-            setActiveLanguage('Hindi');
-          } else if (isHlsStream(fallbackChoice)) {
-            setActiveLanguage('Hindi');
-          } else {
-            setActiveLanguage(initialLangs[0] || 'English');
-          }
-        }
-
         setSelectedStream(chosen);
       } catch (err: any) {
         if (active) {
